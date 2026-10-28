@@ -1,81 +1,259 @@
+# import os
+# import cv2
+# import torch
+# import numpy as np
+# from torch.utils.data import Dataset
+
+# class IRSequenceDataset(Dataset):
+#     def __init__(self, sequence_dir, window_size=10, intensity_threshold=20):
+#         """
+#         Args:
+#             sequence_dir (str): Path to the SIATD_Dataset sequences.
+#             window_size (int): Number of frames per spatiotemporal block (default: 10).
+#             intensity_threshold (int): Pixel value threshold to retain as sparse coordinates.
+#         """
+#         self.sequence_dir = sequence_dir
+#         self.window_size = window_size
+#         self.intensity_threshold = intensity_threshold
+        
+#         # Collect all valid sequences and frame paths
+#         self.samples = []
+#         if os.path.exists(sequence_dir):
+#             seq_folders = sorted([f for f in os.listdir(sequence_dir) if os.path.isdir(os.path.join(sequence_dir, f))])
+#             for seq in seq_folders:
+#                 seq_path = os.path.join(sequence_dir, seq)
+#                 frames = sorted([f for f in os.listdir(seq_path) if f.endswith(('.png', '.jpg'))])
+                
+#                 # Create sliding windows of size `window_size`
+#                 for i in range(len(frames) - self.window_size + 1):
+#                     self.samples.append({
+#                         'seq_path': seq_path,
+#                         'frame_names': frames[i : i + self.window_size]
+#                     })
+#         else:
+#             print(f"Warning: Dataset directory '{sequence_dir}' not found. Waiting for data.")
+
+#     def apply_tsvd_suppression(self, frame, k=5):
+#         """
+#         Approximates t-SVD background suppression by removing the top 'k' singular values
+#         which typically represent the slow-moving/static background clutter.
+#         """
+#         U, S, Vt = np.linalg.svd(frame.astype(np.float32), full_matrices=False)
+#         # Reconstruct background using top k components
+#         background = np.dot(U[:, :k], np.dot(np.diag(S[:k]), Vt[:k, :]))
+#         # Subtract background to highlight small targets/anomalies
+#         target_enhanced = frame.astype(np.float32) - background
+#         return np.clip(target_enhanced, 0, 255)
+
+#     def __len__(self):
+#         return max(1, len(self.samples))  # Prevent crash if empty during setup
+
+#     def __getitem__(self, idx):
+#         if not self.samples:
+#             # Dummy return for initialization testing before data is downloaded
+#             dummy_coords = torch.tensor([[0, 5, 5]], dtype=torch.int32)
+#             dummy_features = torch.tensor([[0.5]], dtype=torch.float32)
+#             dummy_targets = torch.tensor([[0.0]], dtype=torch.float32)
+#             return dummy_coords, dummy_features, dummy_targets
+
+#         sample = self.samples[idx]
+#         seq_path = sample['seq_path']
+        
+#         coords_list, features_list, targets_list = [], [], []
+        
+#         for t, frame_name in enumerate(sample['frame_names']):
+#             img_path = os.path.join(seq_path, frame_name)
+#             img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+            
+#             # Apply background suppression
+#             processed_img = self.apply_tsvd_suppression(img)
+            
+#             # Filter sparse points (only keep pixels above threshold)
+#             y_idx, x_idx = np.where(processed_img > self.intensity_threshold)
+            
+#             if len(y_idx) > 0:
+#                 # Format: [time, H, W]
+#                 t_idx = np.full_like(y_idx, t)
+#                 frame_coords = np.stack([t_idx, y_idx, x_idx], axis=-1)
+                
+#                 # Normalize features to [0, 1]
+#                 frame_features = processed_img[y_idx, x_idx] / 255.0
+                
+#                 # Mock ground truth targets (replace with actual annotation parsing logic)
+#                 # Currently labels top 1% brightest remaining pixels as targets for pipeline testing
+#                 threshold_99 = np.percentile(frame_features, 99) if len(frame_features) > 10 else 1.0
+#                 frame_targets = (frame_features >= threshold_99).astype(np.float32)
+                
+#                 coords_list.append(frame_coords)
+#                 features_list.append(frame_features.reshape(-1, 1))
+#                 targets_list.append(frame_targets.reshape(-1, 1))
+
+#         # Concatenate block arrays
+#         if coords_list:
+#             coords = torch.tensor(np.concatenate(coords_list, axis=0), dtype=torch.int32)
+#             features = torch.tensor(np.concatenate(features_list, axis=0), dtype=torch.float32)
+#             targets = torch.tensor(np.concatenate(targets_list, axis=0), dtype=torch.float32)
+#         else:
+#             # Fallback for completely empty blocks
+#             coords = torch.tensor([[0, 0, 0]], dtype=torch.int32)
+#             features = torch.tensor([[0.0]], dtype=torch.float32)
+#             targets = torch.tensor([[0.0]], dtype=torch.float32)
+
+#         return coords, features, targets
+
+
 import os
+import cv2
 import torch
 import numpy as np
-import cv2
 from torch.utils.data import Dataset
 
 class IRSequenceDataset(Dataset):
-    def __init__(self, sequence_dir, sequence_length=10, threshold=20):
+    def __init__(self, sequence_dir, annotation_dir=None, window_size=10, intensity_threshold=20, target_size=(256, 256), sequence_list=None):
         """
-        sequence_dir: Path to the directory containing sequence folders (e.g., SIATD_Dataset/sequences)
-        sequence_length: Number of frames to stack (PISTTN uses 10)
-        threshold: Hard thresholding value for the sparse component (lambda_seg = 20)
+        Args:
+            sequence_dir (str): Path to the SIATD_Dataset sequences folder.
+            annotation_dir (str, optional): Path to ground truth text/CSV annotations.
+            window_size (int): Temporal window length (default: 10).
+            intensity_threshold (int): Background threshold for voxel sparsification.
+            target_size (tuple): (Height, Width) for frame spatial normalization.
+            sequence_list (list, optional): Specific sequence names to load (e.g., ['seq_01', 'seq_02']). If None, loads all.
         """
         self.sequence_dir = sequence_dir
-        self.sequence_length = sequence_length
-        self.threshold = threshold
+        self.annotation_dir = annotation_dir if annotation_dir else os.path.join(os.path.dirname(sequence_dir), "annotations")
+        self.window_size = window_size
+        self.intensity_threshold = intensity_threshold
+        self.target_size = target_size
         
-        # Collect all valid frame sequences here
-        self.samples = self._build_sequence_samples()
-
-    def _build_sequence_samples(self):
-        samples = []
-        
-        # Iterate over each sequence folder (e.g., seq_001, seq_002)
-        for seq_folder in sorted(os.listdir(self.sequence_dir)):
-            seq_path = os.path.join(self.sequence_dir, seq_folder)
-            if not os.path.isdir(seq_path):
-                continue
-                
-            # Grab all image files and sort them to ensure chronological order
-            frames = sorted([f for f in os.listdir(seq_path) if f.endswith(('.png', '.jpg'))])
+        self.samples = []
+        if os.path.exists(sequence_dir):
+            all_seq_folders = sorted([f for f in os.listdir(sequence_dir) if os.path.isdir(os.path.join(sequence_dir, f))])
             
-            # Create sliding windows of 10 frames
-            # E.g., Window 1: frames 0-9, Window 2: frames 1-10
-            for i in range(len(frames) - self.sequence_length + 1):
-                chunk = [os.path.join(seq_path, frames[i + j]) for j in range(self.sequence_length)]
-                samples.append(chunk)
-                
-        return samples
+            # Filter sequences if a specific list is provided for train/test splitting
+            if sequence_list is not None:
+                seq_folders = [seq for seq in all_seq_folders if seq in sequence_list]
+            else:
+                seq_folders = all_seq_folders
 
-    def _apply_tsvd(self, frame_stack):
+            for seq in seq_folders:
+                seq_path = os.path.join(sequence_dir, seq)
+                frames = sorted([f for f in os.listdir(seq_path) if f.endswith(('.png', '.jpg', '.bmp'))])
+                
+                # Check for sequence annotation file
+                annot_file = os.path.join(self.annotation_dir, f"{seq}.txt")
+                if not os.path.exists(annot_file):
+                    annot_file = os.path.join(seq_path, "groundtruth.txt")
+                
+                for i in range(len(frames) - self.window_size + 1):
+                    self.samples.append({
+                        'seq_name': seq,
+                        'seq_path': seq_path,
+                        'frame_names': frames[i : i + self.window_size],
+                        'start_frame_idx': i,
+                        'annot_file': annot_file if os.path.exists(annot_file) else None
+                    })
+        else:
+            print(f"Warning: Dataset directory '{sequence_dir}' not found.")
+
+    def _load_annotations(self, annot_file):
         """
-        Applies truncated SVD to separate low-rank background from sparse targets.
+        Parses SIATD annotation files.
+        Expected line format: frame_idx, target_id, x, y, w, h
         """
-        # Flatten the spatial dimensions for SVD: Shape becomes (Time, Height * Width)
-        t, h, w = frame_stack.shape
-        matrix = frame_stack.reshape(t, -1)
+        annots = {}
+        if not annot_file or not os.path.exists(annot_file):
+            return annots
         
-        # Perform SVD
-        U, S, V = np.linalg.svd(matrix, full_matrices=False)
-        
-        # Reconstruct background using the top singular value (low-rank component)
-        # S_trunc keeps only the first singular value
-        S_trunc = np.zeros_like(S)
-        S_trunc[0] = S[0] 
-        background = np.dot(U * S_trunc, V)
-        
-        # Extract sparse target component
-        sparse_target = matrix - background
-        sparse_target = sparse_target.reshape(t, h, w)
-        
-        # Apply hard thresholding (lambda_seg = 20)
-        sparse_target[sparse_target < self.threshold] = 0
-        
-        return sparse_target
+        with open(annot_file, 'r') as f:
+            for line in f:
+                parts = line.strip().replace('\t', ',').split(',')
+                if len(parts) >= 5:
+                    try:
+                        if len(parts) >= 6:
+                            f_idx, _, x, y, w, h = int(parts[0]), int(parts[1]), float(parts[2]), float(parts[3]), float(parts[4]), float(parts[5])
+                        else:
+                            f_idx, x, y, w, h = int(parts[0]), float(parts[1]), float(parts[2]), float(parts[3]), float(parts[4])
+                        
+                        if f_idx not in annots:
+                            annots[f_idx] = []
+                        annots[f_idx].append([x, y, w, h])
+                    except ValueError:
+                        continue
+        return annots
+
+    def apply_tsvd_suppression(self, frame, k=5):
+        """
+        t-SVD background clutter suppression removing top k components.
+        """
+        U, S, Vt = np.linalg.svd(frame.astype(np.float32), full_matrices=False)
+        background = np.dot(U[:, :k], np.dot(np.diag(S[:k]), Vt[:k, :]))
+        target_enhanced = frame.astype(np.float32) - background
+        return np.clip(target_enhanced, 0, 255)
 
     def __len__(self):
-        return len(self.samples)
+        return max(1, len(self.samples))
 
     def __getitem__(self, idx):
-        frame_paths = self.samples[idx]
+        if not self.samples:
+            dummy_coords = torch.tensor([[0, 5, 5]], dtype=torch.int32)
+            dummy_features = torch.tensor([[0.5]], dtype=torch.float32)
+            dummy_targets = torch.tensor([[0.0]], dtype=torch.float32)
+            dummy_boxes = torch.tensor([[0.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+            return dummy_coords, dummy_features, dummy_targets, dummy_boxes
+
+        sample = self.samples[idx]
+        seq_path = sample['seq_path']
+        annots = self._load_annotations(sample['annot_file'])
         
-        # Load the 10 frames
-        frames = [cv2.imread(p, cv2.IMREAD_GRAYSCALE) for p in frame_paths]
-        frame_stack = np.stack(frames, axis=0).astype(np.float32)
+        coords_list, features_list, targets_list, boxes_list = [], [], [], []
         
-        # Process the stack to get the sparse tensor
-        sparse_tensor = self._apply_tsvd(frame_stack)
-        
-        # Convert to PyTorch tensor
-        return torch.tensor(sparse_tensor).unsqueeze(0) # Add channel dimension
+        for t, frame_name in enumerate(sample['frame_names']):
+            img_path = os.path.join(seq_path, frame_name)
+            img = cv2.imread(img_path, cv2.IMREAD_GRAYSCALE)
+            if img is None:
+                continue
+            
+            # Standardize spatial dimensions if needed
+            if self.target_size and (img.shape[0] != self.target_size[0] or img.shape[1] != self.target_size[1]):
+                img = cv2.resize(img, (self.target_size[1], self.target_size[0]))
+            
+            processed_img = self.apply_tsvd_suppression(img)
+            y_idx, x_idx = np.where(processed_img > self.intensity_threshold)
+            
+            # Retrieve annotations for this frame (1-based vs 0-based offset handling)
+            frame_annots = annots.get(sample['start_frame_idx'] + t, [])
+            if not frame_annots:
+                frame_annots = annots.get(sample['start_frame_idx'] + t + 1, [])
+            
+            if len(y_idx) > 0:
+                t_idx = np.full_like(y_idx, t)
+                frame_coords = np.stack([t_idx, y_idx, x_idx], axis=-1)
+                frame_features = processed_img[y_idx, x_idx] / 255.0
+                
+                frame_targets = np.zeros((len(y_idx), 1), dtype=np.float32)
+                frame_boxes = np.zeros((len(y_idx), 4), dtype=np.float32)
+                
+                # Match sparse voxels against target bounding boxes
+                for gt_box in frame_annots:
+                    gx, gy, gw, gh = gt_box
+                    inside = (x_idx >= gx) & (x_idx <= gx + gw) & (y_idx >= gy) & (y_idx <= gy + gh)
+                    frame_targets[inside] = 1.0
+                    frame_boxes[inside] = [gx + gw / 2.0, gy + gh / 2.0, gw, gh]
+                
+                coords_list.append(frame_coords)
+                features_list.append(frame_features.reshape(-1, 1))
+                targets_list.append(frame_targets)
+                boxes_list.append(frame_boxes)
+
+        if coords_list:
+            coords = torch.tensor(np.concatenate(coords_list, axis=0), dtype=torch.int32)
+            features = torch.tensor(np.concatenate(features_list, axis=0), dtype=torch.float32)
+            targets = torch.tensor(np.concatenate(targets_list, axis=0), dtype=torch.float32)
+            boxes = torch.tensor(np.concatenate(boxes_list, axis=0), dtype=torch.float32)
+        else:
+            coords = torch.tensor([[0, 0, 0]], dtype=torch.int32)
+            features = torch.tensor([[0.0]], dtype=torch.float32)
+            targets = torch.tensor([[0.0]], dtype=torch.float32)
+            boxes = torch.tensor([[0.0, 0.0, 0.0, 0.0]], dtype=torch.float32)
+
+        return coords, features, targets, boxes
