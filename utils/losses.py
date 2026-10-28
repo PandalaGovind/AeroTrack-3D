@@ -1,33 +1,3 @@
-# import torch
-# import torch.nn as nn
-
-# class SparseFocalLoss(nn.Module):
-#     def __init__(self, alpha=0.25, gamma=2.0, reduction='mean'):
-#         super(SparseFocalLoss, self).__init__()
-#         self.alpha = alpha
-#         self.gamma = gamma
-#         self.reduction = reduction
-#         self.eps = 1e-5  # Safely within float32 precision limits
-
-#     def forward(self, predictions, targets):
-#         # Clamp to prevent log(0) using a safe float32 epsilon
-#         predictions = torch.clamp(predictions, self.eps, 1.0 - self.eps)
-        
-#         bce_pos = -targets * torch.log(predictions)
-#         bce_neg = -(1.0 - targets) * torch.log(1.0 - predictions)
-        
-#         focal_pos = self.alpha * torch.pow(1.0 - predictions, self.gamma) * bce_pos
-#         focal_neg = (1.0 - self.alpha) * torch.pow(predictions, self.gamma) * bce_neg
-        
-#         loss = focal_pos + focal_neg
-        
-#         if self.reduction == 'mean':
-#             return loss.mean()
-#         elif self.reduction == 'sum':
-#             return loss.sum()
-#         return loss
-
-
 import torch
 import torch.nn as nn
 
